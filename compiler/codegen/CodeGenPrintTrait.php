@@ -28,31 +28,66 @@ trait CodeGenPrintTrait {
     }
 
     private function emitPrintFloatReg(string $reg): void {
-        $wReg = $this->regs->to32($reg);
-        $matchLabel = $this->labels->newLabel('FLT_MATCH');
-        $endLabel = $this->labels->newLabel('FLT_END');
+        // Detectar si es float register
+        $isFloatReg = str_starts_with($reg, 's') || str_starts_with($reg, 'd');
+        
+        if ($isFloatReg) {
+            // Para float registers, usar fcmp
+            $matchLabel = $this->labels->newLabel('FLT_MATCH');
+            $endLabel = $this->labels->newLabel('FLT_END');
 
-        foreach ($this->floatLiterals as $meta) {
-            $nextLabel = $this->labels->newLabel('FLT_NEXT');
-            $tmpAddr = $this->regs->allocate();
-            $tmpVal = $this->regs->allocate();
-            $tmpW = $this->regs->to32($tmpVal);
+            foreach ($this->floatLiterals as $meta) {
+                $nextLabel = $this->labels->newLabel('FLT_NEXT');
+                $tmpAddr = $this->regs->allocate();
+                $tmpVal = $this->regs->allocate();
+                $tmpFloat = $this->fregs->allocate();
 
-            $this->asm->writeLine("adrp $tmpAddr, {$meta['bitsLabel']}");
-            $this->asm->writeLine("add  $tmpAddr, $tmpAddr, :lo12:{$meta['bitsLabel']}");
-            $this->asm->writeLine("ldr $tmpW, [$tmpAddr]");
-            $this->asm->writeLine("cmp $wReg, $tmpW");
-            $this->asm->writeLine("b.ne $nextLabel");
-            $this->emitWriteLabel($meta['strLabel'], strlen($meta['display']));
-            $this->asm->writeLine("b $endLabel");
-            $this->asm->writeLabel($nextLabel);
+                $this->asm->writeLine("adrp $tmpAddr, {$meta['bitsLabel']}");
+                $this->asm->writeLine("add  $tmpAddr, $tmpAddr, :lo12:{$meta['bitsLabel']}");
+                $this->asm->writeLine("ldr " . $this->regs->to32($tmpVal) . ", [$tmpAddr]");
+                // Convertir int bits a float para comparación
+                $this->asm->writeLine("fmov $tmpFloat, " . $this->regs->to32($tmpVal));
+                $this->asm->writeLine("fcmp $reg, $tmpFloat");
+                $this->asm->writeLine("b.ne $nextLabel");
+                $this->emitWriteLabel($meta['strLabel'], strlen($meta['display']));
+                $this->asm->writeLine("b $endLabel");
+                $this->asm->writeLabel($nextLabel);
 
-            $this->regs->free($tmpAddr);
-            $this->regs->free($tmpVal);
+                $this->regs->free($tmpAddr);
+                $this->regs->free($tmpVal);
+                $this->fregs->free($tmpFloat);
+            }
+
+            $this->emitWriteLabel('str_float_unknown', 7);
+            $this->asm->writeLabel($endLabel);
+        } else {
+            // Para integer registers (legacy path)
+            $wReg = $this->regs->to32($reg);
+            $matchLabel = $this->labels->newLabel('FLT_MATCH');
+            $endLabel = $this->labels->newLabel('FLT_END');
+
+            foreach ($this->floatLiterals as $meta) {
+                $nextLabel = $this->labels->newLabel('FLT_NEXT');
+                $tmpAddr = $this->regs->allocate();
+                $tmpVal = $this->regs->allocate();
+                $tmpW = $this->regs->to32($tmpVal);
+
+                $this->asm->writeLine("adrp $tmpAddr, {$meta['bitsLabel']}");
+                $this->asm->writeLine("add  $tmpAddr, $tmpAddr, :lo12:{$meta['bitsLabel']}");
+                $this->asm->writeLine("ldr $tmpW, [$tmpAddr]");
+                $this->asm->writeLine("cmp $wReg, $tmpW");
+                $this->asm->writeLine("b.ne $nextLabel");
+                $this->emitWriteLabel($meta['strLabel'], strlen($meta['display']));
+                $this->asm->writeLine("b $endLabel");
+                $this->asm->writeLabel($nextLabel);
+
+                $this->regs->free($tmpAddr);
+                $this->regs->free($tmpVal);
+            }
+
+            $this->emitWriteLabel('str_float_unknown', 7);
+            $this->asm->writeLabel($endLabel);
         }
-
-        $this->emitWriteLabel('str_float_unknown', 7);
-        $this->asm->writeLabel($endLabel);
     }
 
     //  FMT.PRINTLN —  MULTI-TIPO Y MULTI-ARGUMENTO
@@ -111,9 +146,9 @@ trait CodeGenPrintTrait {
             return;
         }
 
-        if ($this->isFloatLiteralText($exprText)) {
+        if ($this->isFloatLiteralText($exprText) || $this->getExprType($expr) === 'float32') {
             $reg = $this->visit($expr);
-            $this->asm->writeComment("print float literal");
+            $this->asm->writeComment("print float expr");
             $this->emitPrintFloatReg($reg);
             $this->regs->free($reg);
             return;

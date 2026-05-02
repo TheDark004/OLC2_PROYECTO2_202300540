@@ -35,10 +35,20 @@ class TypeChecker {
      * Siempre retornan 'bool'.
      */
     public function checkRelational(string $op, string $leftType, string $rightType): ?string {
-        if ($leftType !== $rightType) {
-            return null; // No puedes comparar un int32 con un string
+        // Comparaciones entre el mismo tipo siempre son válidas.
+        if ($leftType === $rightType) {
+            return 'bool';
         }
-        return 'bool';
+
+        // nil se puede comparar con cualquier puntero.
+        if ($leftType === 'nil' && str_starts_with($rightType, '*')) {
+            return 'bool';
+        }
+        if ($rightType === 'nil' && str_starts_with($leftType, '*')) {
+            return 'bool';
+        }
+
+        return null; // Comparación inválida entre tipos distintos.
     }
 
     /**

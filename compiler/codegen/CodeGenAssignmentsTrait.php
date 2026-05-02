@@ -33,6 +33,13 @@ trait CodeGenAssignmentsTrait {
     }
 
     private function getSymbolElementSize($symbol): int {
+        if (!empty($symbol->arrayDims)) {
+            $baseType = $symbol->type;
+            if ($symbol->isPointer) {
+                $baseType = ltrim($baseType, '*');
+            }
+            return SymbolTable::getTypeSize($baseType, null, false);
+        }
         return SymbolTable::getTypeSize($symbol->type, null, $symbol->isPointer);
     }
 
@@ -87,7 +94,7 @@ trait CodeGenAssignmentsTrait {
 
         foreach ($exprs as $i => $exprCtx) {
             $reg = $this->visit($exprCtx);
-            $offset = $symbol->offset + ($i * $elementSize);
+            $offset = $symbol->offset - ($i * $elementSize);
             $this->storeRegisterInFrameOffset($symbol, $offset, $reg);
             $this->regs->free($reg);
         }
@@ -101,7 +108,7 @@ trait CodeGenAssignmentsTrait {
         }
 
         for ($i = 0; $i < $count; $i++) {
-            $offset = $symbol->offset + ($i * $elementSize);
+            $offset = $symbol->offset - ($i * $elementSize);
             $this->storeRegisterInFrameOffset($symbol, $offset, $elementSize === 8 ? 'xzr' : 'wzr');
         }
     }
@@ -109,12 +116,17 @@ trait CodeGenAssignmentsTrait {
     private function computeArrayElementAddress($symbol, array $indexExprs): string {
         $baseReg = $this->regs->allocate();
         
-        if ($symbol->isParameter && !empty($symbol->arrayDims)) {
-            // Si el arreglo viene por parámetro, el stack guarda el PUNTERO
+        
+        $isPointer = (property_exists($symbol, 'isPointer') && $symbol->isPointer) || 
+                     str_contains((string)$symbol->type, '*');
+
+        if ($isPointer) {
+            $this->asm->writeComment("Cargar puntero base del arreglo referenciado '{$symbol->name}'");
+            $this->asm->writeLine("ldr $baseReg, [x29, #{$symbol->offset}]");
+        } else if ($symbol->isParameter && !empty($symbol->arrayDims)) {
             $this->asm->writeComment("Cargar puntero base del arreglo parámetro '{$symbol->name}'");
             $this->asm->writeLine("ldr $baseReg, [x29, #{$symbol->offset}]");
         } else {
-            // Si es local, calculamos su dirección normal
             $this->emitFrameAddress($baseReg, $symbol->offset);
         }
 
@@ -144,6 +156,7 @@ trait CodeGenAssignmentsTrait {
             $this->regs->free($sizeReg);
         }
 
+       
         $this->asm->writeLine("add $baseReg, $baseReg, $linearReg");
         $this->regs->free($linearReg);
         return $baseReg;
@@ -186,7 +199,73 @@ trait CodeGenAssignmentsTrait {
     }
 
     public function visitAssignStmt($ctx) {
-        return $this->handleAssignment($ctx->ID()->getText(), $ctx->e());
+        
+        if (method_exists($ctx, 'derefExpr') && $ctx->derefExpr() !== null) {
+            $name = $ctx->derefExpr()->ID()->getText();
+            $symbol = $this->getSymbol($name);
+            if ($symbol === null) return null;
+
+            $this->asm->writeComment("Asignar valor a través del puntero '{$name}'");
+            
+          
+            $rightReg = $this->visit($ctx->e());
+            
+           
+            $ptrReg = $this->regs->allocate();
+            $this->asm->writeLine("ldr $ptrReg, [x29, #{$symbol->offset}]");
+
+            
+            $elementSize = $this->getSymbolElementSize($symbol);
+            if ($elementSize === 8) {
+                $this->asm->writeLine("str $rightReg, [$ptrReg]");
+            } else {
+                $wReg = $this->regs->to32($rightReg);
+                $this->asm->writeLine("str $wReg, [$ptrReg]");
+            }
+
+            $this->regs->free($ptrReg);
+            $this->regs->free($rightReg);
+            return null;
+        }
+
+        
+        if (method_exists($ctx, 'ID') && $ctx->ID() !== null) {
+            $name = $ctx->ID()->getText();
+            return $this->handleAssignment($name, $ctx->e());
+        }
+
+        return null;
+    }
+
+    public function visitDerefAssignStmt($ctx) {
+        $name = $ctx->ID()->getText();
+        $symbol = $this->getSymbol($name);
+        if ($symbol === null) return null;
+
+        $this->asm->writeComment("Asignar valor a través del puntero '{$name}'");
+        
+       
+        $rightReg = $this->visit($ctx->e());
+        
+        
+        $ptrReg = $this->regs->allocate();
+        $this->asm->writeLine("ldr $ptrReg, [x29, #{$symbol->offset}]");
+
+        
+        $baseType = str_replace('*', '', $symbol->type);
+        
+        if ($baseType === 'int32' || $baseType === 'float32' || $baseType === 'int' || $baseType === 'bool' || $baseType === 'rune') {
+           
+            $wReg = $this->regs->to32($rightReg);
+            $this->asm->writeLine("str $wReg, [$ptrReg]");
+        } else {
+           
+            $this->asm->writeLine("str $rightReg, [$ptrReg]");
+        }
+
+        $this->regs->free($ptrReg);
+        $this->regs->free($rightReg);
+        return null;
     }
 
     public function visitArrayAssignND($ctx) {
@@ -195,24 +274,31 @@ trait CodeGenAssignmentsTrait {
         if ($symbol === null) return null;
 
         $exprs = $ctx->e();
-        $valueToStoreCtx = array_pop($exprs); 
-        $valueReg = $this->visit($valueToStoreCtx);
-
+        $valueExpr = $exprs[count($exprs) - 1]; 
       
-        $addrReg = $this->computeArrayElementAddress($symbol, $exprs);
+        $indexExprs = array_slice($exprs, 0, -1);
 
-       
-        $elementSize = $this->getSymbolElementSize($symbol);
-        $this->asm->writeComment("Asignar a arreglo '$name'");
+        $this->asm->writeComment("Asignacion a arreglo ND: {$name}");
         
-        if ($elementSize === 8) {
-            $this->asm->writeLine("str $valueReg, [$addrReg]");
+  
+        $baseReg = $this->computeArrayElementAddress($symbol, $indexExprs);
+
+
+        $valReg = $this->visit($valueExpr);
+
+        $elementSize = $this->getSymbolElementSize($symbol);
+        
+        if (str_starts_with($valReg, 's') || str_starts_with($valReg, 'd')) {
+            $this->asm->writeLine("str $valReg, [$baseReg]");
+        } else if ($elementSize === 8) {
+            $this->asm->writeLine("str $valReg, [$baseReg]");
         } else {
-            $this->asm->writeLine("str " . $this->regs->to32($valueReg) . ", [$addrReg]");
+            $wReg = $this->regs->to32($valReg);
+            $this->asm->writeLine("str $wReg, [$baseReg]");
         }
 
-        $this->regs->free($valueReg);
-        $this->regs->free($addrReg);
+        $this->regs->free($baseReg);
+        $this->regs->free($valReg);
         return null;
     }
 
@@ -249,12 +335,43 @@ trait CodeGenAssignmentsTrait {
             throw new Exception("La expresión asignada a '{$name}' todavía no está soportada en la generación ARM64.");
         }
 
-        $this->asm->writeComment("Guardar '$name' en [x29, {$symbol->offset}]");
-        $this->storeRegisterInFrameOffset($symbol, $symbol->offset, $reg);
+        if (!empty($symbol->arrayDims)) {
+            $totalBytes = SymbolTable::getTypeSize($symbol->type, $symbol->arrayDims, false);
+            $this->emitMemcpy($symbol->offset, $reg, $totalBytes);
+        } else {
+            
+            $this->asm->writeComment("Guardar '$name' en [x29, {$symbol->offset}]");
+            $this->storeRegisterInFrameOffset($symbol, $symbol->offset, $reg);
+        }
 
         $this->regs->free($reg);
         return null;
     }
+
+
+    private function emitMemcpy(int $destOffset, string $srcReg, int $totalBytes): void {
+        $this->asm->writeComment("Inicia copia profunda de arreglo ($totalBytes bytes)");
+        $destReg = $this->regs->allocate();
+        $this->emitFrameAddress($destReg, $destOffset);
+        
+        $tmp = $this->regs->allocate();
+        $wTmp = $this->regs->to32($tmp);
+        
+        
+        $words = intdiv($totalBytes, 4);
+        for ($i = 0; $i < $words; $i++) {
+            $this->asm->writeLine("ldr $wTmp, [$srcReg]");
+            $this->asm->writeLine("str $wTmp, [$destReg]");
+            
+            $this->asm->writeLine("sub $srcReg, $srcReg, #4");
+            $this->asm->writeLine("sub $destReg, $destReg, #4");
+        }
+        
+        $this->regs->free($tmp);
+        $this->regs->free($destReg);
+        $this->asm->writeComment("Fin de copia de arreglo");
+    }
+
 
     private function handleCompoundAssign(string $name, $exprCtx, string $op) {
         $symbol = $this->getSymbol($name);

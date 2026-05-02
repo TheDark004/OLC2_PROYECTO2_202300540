@@ -19,6 +19,14 @@ trait CodeGenExprTrait {
         }
 
         // Resto normal de lectura de variables
+        // Si es float32, cargarlo en float register
+        if ($symbol->type === 'float32') {
+            $reg = $this->fregs->allocate();
+            $this->asm->writeComment("Leer variable float '$name'");
+            $this->asm->writeLine("ldr $reg, [x29, #{$symbol->offset}]");
+            return $reg;
+        }
+
         $reg  = $this->regs->allocate();
         $size = SymbolTable::getTypeSize($symbol->type, null, $symbol->isPointer);
 
@@ -31,49 +39,166 @@ trait CodeGenExprTrait {
 
         return $reg;
     }
-    
+
     public function visitArrayAccessND($ctx) {
         $name = $ctx->ID()->getText();
         $symbol = $this->getSymbol($name);
-        if ($symbol === null) {
-            return null;
-        }
+        if ($symbol === null) return null;
 
-        $addrReg = $this->computeArrayElementAddress($symbol, $ctx->e()); // se obtiene el registro que contiene en memoria
-
-        $valueReg = $this->regs->allocate(); // se prepara para guardar el valor 
-        $elementSize = SymbolTable::getTypeSize($symbol->type, null, $symbol->isPointer);
-
-        $this->asm->writeComment("Leer arreglo '$name'");
+        $indexExprs = $ctx->e();
         
+        $this->asm->writeComment("Lectura de arreglo ND: {$name}");
+        
+        $baseReg = $this->computeArrayElementAddress($symbol, $indexExprs);
+
+        $valReg = $this->regs->allocate();
+        $elementSize = $this->getSymbolElementSize($symbol);
+
+       
         if ($elementSize === 8) {
-            $this->asm->writeLine("ldr $valueReg, [$addrReg]");
+            $this->asm->writeLine("ldr $valReg, [$baseReg]");
         } else {
-            $this->asm->writeLine("ldr " . $this->regs->to32($valueReg) . ", [$addrReg]");
+            $wReg = $this->regs->to32($valReg);
+            $this->asm->writeLine("ldr $wReg, [$baseReg]");
         }
 
-        $this->regs->free($addrReg);
-        return $valueReg;
-    }
-
-    public function visitIntLit($ctx) {
-        $reg = $this->regs->allocate();
-        $this->asm->writeLine("mov " . $this->regs->to32($reg) . ", #" . $ctx->getText());
-        return $reg;
+        $this->regs->free($baseReg);
+        return $valReg;
     }
 
     public function visitFloatLit($ctx) {
         $meta = $this->internFloatLiteral($ctx->getText());
         $addrReg = $this->regs->allocate();
-        $reg = $this->regs->allocate();
+        $tmpInt = $this->regs->allocate();
+        $floatReg = $this->fregs->allocate();
 
         $this->asm->writeComment("Cargar float32 literal " . $ctx->getText());
         $this->asm->writeLine("adrp $addrReg, {$meta['bitsLabel']}");
         $this->asm->writeLine("add  $addrReg, $addrReg, :lo12:{$meta['bitsLabel']}");
-        $this->asm->writeLine("ldr " . $this->regs->to32($reg) . ", [$addrReg]");
+        $this->asm->writeLine("ldr " . $this->regs->to32($tmpInt) . ", [$addrReg]");
+        $this->asm->writeLine("fmov $floatReg, " . $this->regs->to32($tmpInt));
 
         $this->regs->free($addrReg);
-        return $reg;
+        $this->regs->free($tmpInt);
+        return $floatReg;
+    }
+
+    private function getExprType($ctx): string {
+        if ($ctx === null) {
+            return 'unknown';
+        }
+
+        $class = get_class($ctx);
+
+        if (str_ends_with($class, 'IntLitContext')) {
+            return 'int32';
+        }
+        if (str_ends_with($class, 'FloatLitContext')) {
+            return 'float32';
+        }
+        if (str_ends_with($class, 'BoolLitContext')) {
+            return 'bool';
+        }
+        if (str_ends_with($class, 'StringLitContext')) {
+            return 'string';
+        }
+        if (str_ends_with($class, 'RuneLitContext')) {
+            return 'rune';
+        }
+        if (str_ends_with($class, 'NilLitContext')) {
+            return 'nil';
+        }
+
+        if (str_ends_with($class, 'IdExprContext')) {
+            $symbol = $this->getSymbol($ctx->ID()->getText());
+            if ($symbol === null) {
+                return 'unknown';
+            }
+            if (!empty($symbol->arrayDims)) {
+                return '*' . $symbol->type;
+            }
+            if ($symbol->isPointer) {
+                return '*' . $symbol->type;
+            }
+            return $symbol->type;
+        }
+
+        if (str_ends_with($class, 'ArrayAccessNDContext')) {
+            $name = $ctx->ID()->getText();
+            $symbol = $this->getSymbol($name);
+            if ($symbol === null) {
+                return 'unknown';
+            }
+            return $symbol->type;
+        }
+
+        if (str_ends_with($class, 'RefExprContext')) {
+            $symbol = $this->getSymbol($ctx->ID()->getText());
+            if ($symbol === null) {
+                return 'unknown';
+            }
+            return '*' . $symbol->type;
+        }
+
+        if (str_ends_with($class, 'DerefExprContext')) {
+            $symbol = $this->getSymbol($ctx->ID()->getText());
+            if ($symbol === null) {
+                return 'unknown';
+            }
+            return $symbol->type;
+        }
+
+        if (str_ends_with($class, 'FuncCallExprContext')) {
+            $name = $ctx->ID()->getText();
+            
+            // Detectar builtins
+            if (in_array($name, ['len', 'now'], true)) {
+                return 'int32';
+            }
+            if (in_array($name, ['typeof', 'substr'], true)) {
+                return 'string';
+            }
+            
+            // Búsqueda en funciones custom
+            $sig = $this->functionSignatures[$name] ?? null;
+            if ($sig !== null && count($sig['returns']) > 0) {
+                return $sig['returns'][0];
+            }
+            return 'int32';
+        }
+
+        if (str_ends_with($class, 'GroupExprContext')) {
+            return $this->getExprType($ctx->e());
+        }
+
+        if (str_ends_with($class, 'NegExprContext')) {
+            return $this->getExprType($ctx->e());
+        }
+
+        if (str_ends_with($class, 'NotExprContext')) {
+            return 'bool';
+        }
+
+        if (str_ends_with($class, 'AddExprContext') || str_ends_with($class, 'MulExprContext') || str_ends_with($class, 'RelExprContext') || str_ends_with($class, 'EqExprContext') || str_ends_with($class, 'AndExprContext') || str_ends_with($class, 'OrExprContext')) {
+            $leftType = $this->getExprType($ctx->e(0));
+            $rightType = $this->getExprType($ctx->e(1));
+            if ($ctx instanceof \Context\RelExprContext || $ctx instanceof \Context\EqExprContext || $ctx instanceof \Context\AndExprContext || $ctx instanceof \Context\OrExprContext) {
+                return 'bool';
+            }
+            if ($leftType === 'float32' || $rightType === 'float32') {
+                return 'float32';
+            }
+            if ($leftType !== 'unknown') {
+                return $leftType;
+            }
+            return $rightType;
+        }
+
+        return 'unknown';
+    }
+
+    private function isFloatExpr($ctx): bool {
+        return $this->getExprType($ctx) === 'float32';
     }
 
     public function visitRuneLit($ctx) {
@@ -91,6 +216,12 @@ trait CodeGenExprTrait {
 
         $reg = $this->regs->allocate();
         $this->asm->writeLine("mov " . $this->regs->to32($reg) . ", #$value");
+        return $reg;
+    }
+
+    public function visitIntLit($ctx) {
+        $reg = $this->regs->allocate();
+        $this->asm->writeLine("mov " . $this->regs->to32($reg) . ", #" . $ctx->getText());
         return $reg;
     }
 
@@ -129,9 +260,44 @@ trait CodeGenExprTrait {
     public function visitAddExpr($ctx) {
         $l   = $this->visit($ctx->e(0));
         $r   = $this->visit($ctx->e(1));
+        
+        $isLFloat = str_starts_with($l, 's') || str_starts_with($l, 'd');
+        $isRFloat = str_starts_with($r, 's') || str_starts_with($r, 'd');
+
+        if ($isLFloat || $isRFloat) {
+            $res = $this->fregs->allocate();
+            $fpOp = $ctx->op->getText() === '+' ? 'fadd' : 'fsub';
+
+            $sL = $l;
+            $sR = $r;
+            $freeL = false;
+            $freeR = false;
+
+            if ($isLFloat && !$isRFloat) {
+                $sR = $this->fregs->allocate();
+                $this->asm->writeLine("scvtf $sR, " . $this->regs->to32($r));
+                $freeR = true;
+            } else if (!$isLFloat && $isRFloat) {
+                $sL = $this->fregs->allocate();
+                $this->asm->writeLine("scvtf $sL, " . $this->regs->to32($l));
+                $freeL = true;
+            }
+
+            $this->asm->writeLine("$fpOp $res, $sL, $sR");
+
+            if ($freeL) $this->fregs->free($sL);
+            if ($freeR) $this->fregs->free($sR);
+            
+            if ($isLFloat) $this->fregs->free($l); else $this->regs->free($l);
+            if ($isRFloat) $this->fregs->free($r); else $this->regs->free($r);
+
+            return $res;
+        }
+
         $res = $this->regs->allocate();
         $op  = $ctx->op->getText() === '+' ? 'add' : 'sub';
         $this->asm->writeLine("$op " . $this->regs->to32($res) . ", " . $this->regs->to32($l) . ", " . $this->regs->to32($r));
+
         $this->regs->free($l);
         $this->regs->free($r);
         return $res;
@@ -140,16 +306,50 @@ trait CodeGenExprTrait {
     public function visitMulExpr($ctx) {
         $l   = $this->visit($ctx->e(0));
         $r   = $this->visit($ctx->e(1));
+        
+        $isLFloat = str_starts_with($l, 's') || str_starts_with($l, 'd');
+        $isRFloat = str_starts_with($r, 's') || str_starts_with($r, 'd');
+
+        if ($isLFloat || $isRFloat) {
+            $res = $this->fregs->allocate();
+            $op  = $ctx->op->getText();
+            $fpOp = $op === '*' ? 'fmul' : 'fdiv';
+            
+            $sL = $l;
+            $sR = $r;
+            $freeL = false;
+            $freeR = false;
+
+            if ($isLFloat && !$isRFloat) {
+                $sR = $this->fregs->allocate();
+                $this->asm->writeLine("scvtf $sR, " . $this->regs->to32($r));
+                $freeR = true;
+            } else if (!$isLFloat && $isRFloat) {
+                $sL = $this->fregs->allocate();
+                $this->asm->writeLine("scvtf $sL, " . $this->regs->to32($l));
+                $freeL = true;
+            }
+
+            $this->asm->writeLine("$fpOp $res, $sL, $sR");
+
+            if ($freeL) $this->fregs->free($sL);
+            if ($freeR) $this->fregs->free($sR);
+            
+            if ($isLFloat) $this->fregs->free($l); else $this->regs->free($l);
+            if ($isRFloat) $this->fregs->free($r); else $this->regs->free($r);
+
+            return $res;
+        }
+
+        // Integer multiplication
         $res = $this->regs->allocate();
         $op  = $ctx->op->getText();
-
+        
         if ($op === '*') {
             $this->asm->writeLine("mul " . $this->regs->to32($res) . ", " . $this->regs->to32($l) . ", " . $this->regs->to32($r));
         } elseif ($op === '/') {
-            // sdiv = signed divide, necesario para int32 con signo
             $this->asm->writeLine("sdiv " . $this->regs->to32($res) . ", " . $this->regs->to32($l) . ", " . $this->regs->to32($r));
         } elseif ($op === '%') {
-            // res = l - (l / r) * r  ->  sdiv tmp, l, r; msub res, tmp, r, l
             $tmp = $this->regs->allocate();
             $this->asm->writeLine("sdiv " . $this->regs->to32($tmp) . ", " . $this->regs->to32($l) . ", " . $this->regs->to32($r));
             $this->asm->writeLine("msub " . $this->regs->to32($res) . ", " . $this->regs->to32($tmp) . ", " . $this->regs->to32($r) . ", " . $this->regs->to32($l));
@@ -168,7 +368,34 @@ trait CodeGenExprTrait {
         $res = $this->regs->allocate();
 
         $this->asm->writeComment("Comparación: " . $ctx->getText());
-        $this->asm->writeLine("cmp " . $this->regs->to32($l) . ", " . $this->regs->to32($r));
+        
+        // Detectar si los registros son flotantes
+        $isLFloat = str_starts_with($l, 's') || str_starts_with($l, 'd');
+        $isRFloat = str_starts_with($r, 's') || str_starts_with($r, 'd');
+
+        if ($isLFloat || $isRFloat) {
+            $sL = $l;
+            $sR = $r;
+            $freeL = false;
+            $freeR = false;
+
+            if ($isLFloat && !$isRFloat) {
+                $sR = $this->fregs->allocate();
+                $this->asm->writeLine("scvtf $sR, " . $this->regs->to32($r));
+                $freeR = true;
+            } else if (!$isLFloat && $isRFloat) {
+                $sL = $this->fregs->allocate();
+                $this->asm->writeLine("scvtf $sL, " . $this->regs->to32($l));
+                $freeL = true;
+            }
+
+            $this->asm->writeLine("fcmp $sL, $sR");
+
+            if ($freeL) $this->fregs->free($sL);
+            if ($freeR) $this->fregs->free($sR);
+        } else {
+            $this->asm->writeLine("cmp " . $this->regs->to32($l) . ", " . $this->regs->to32($r));
+        }
 
         $cond = match($ctx->op->getText()) {
             '<'  => 'lt',
@@ -179,16 +406,61 @@ trait CodeGenExprTrait {
             '!=' => 'ne',
             default => 'eq'
         };
-        // 1 si condición verdadera, 0 si falsa
         $this->asm->writeLine("cset " . $this->regs->to32($res) . ", $cond");
 
-        $this->regs->free($l);
-        $this->regs->free($r);
+        if ($isLFloat) $this->fregs->free($l); else $this->regs->free($l);
+        if ($isRFloat) $this->fregs->free($r); else $this->regs->free($r);
+
         return $res;
     }
 
     public function visitEqExpr($ctx) {
-        return $this->visitRelExpr($ctx);
+        $l   = $this->visit($ctx->e(0));
+        $r   = $this->visit($ctx->e(1));
+        $res = $this->regs->allocate();
+
+        $this->asm->writeComment("Comparación de igualdad: " . $ctx->getText());
+        
+        // Detección dinámica de flotantes
+        $isLFloat = str_starts_with($l, 's') || str_starts_with($l, 'd');
+        $isRFloat = str_starts_with($r, 's') || str_starts_with($r, 'd');
+
+        if ($isLFloat || $isRFloat) {
+            $sL = $l;
+            $sR = $r;
+            $freeL = false;
+            $freeR = false;
+
+            // Si chocan un float y un entero, convertimos el entero a float
+            if ($isLFloat && !$isRFloat) {
+                $sR = $this->fregs->allocate();
+                $this->asm->writeLine("scvtf $sR, " . $this->regs->to32($r));
+                $freeR = true;
+            } else if (!$isLFloat && $isRFloat) {
+                $sL = $this->fregs->allocate();
+                $this->asm->writeLine("scvtf $sL, " . $this->regs->to32($l));
+                $freeL = true;
+            }
+
+            // Usamos la comparación exclusiva de flotantes
+            $this->asm->writeLine("fcmp $sL, $sR");
+
+            if ($freeL) $this->fregs->free($sL);
+            if ($freeR) $this->fregs->free($sR);
+        } else {
+            // Si ambos son enteros, usamos la comparación normal
+            $this->asm->writeLine("cmp " . $this->regs->to32($l) . ", " . $this->regs->to32($r));
+        }
+
+        // Determinar si es == o !=
+        $cond = $ctx->op->getText() === '==' ? 'eq' : 'ne';
+        $this->asm->writeLine("cset " . $this->regs->to32($res) . ", $cond");
+
+        // Liberar registros originales
+        if ($isLFloat) $this->fregs->free($l); else $this->regs->free($l);
+        if ($isRFloat) $this->fregs->free($r); else $this->regs->free($r);
+
+        return $res;
     }
 
     // AND con cortocircuito:
@@ -257,8 +529,11 @@ trait CodeGenExprTrait {
 
     public function visitNegExpr($ctx) {
         $reg = $this->visit($ctx->e());
-        // neg = 0 - reg
-        $this->asm->writeLine("neg " . $this->regs->to32($reg) . ", " . $this->regs->to32($reg));
+        if ($this->isFloatExpr($ctx)) {
+            $this->asm->writeLine("fneg s" . substr($reg, 1) . ", s" . substr($reg, 1));
+        } else {
+            $this->asm->writeLine("neg " . $this->regs->to32($reg) . ", " . $this->regs->to32($reg));
+        }
         return $reg;
     }
 
@@ -289,6 +564,45 @@ trait CodeGenExprTrait {
 
     public function visitCastRune($ctx) {
         return $this->visit($ctx->e());
+    }
+
+    public function visitRefExpr($ctx) {
+        $name = $ctx->ID()->getText();
+        $symbol = $this->getSymbol($name);
+        if ($symbol === null) return null;
+
+        $reg = $this->regs->allocate();
+        $this->asm->writeComment("Obtener dirección de memoria (&) de '{$name}'");
+        
+       
+        $this->emitFrameAddress($reg, $symbol->offset);
+        
+        return $reg;
+    }
+
+    public function visitDerefExpr($ctx) {
+        $name = $ctx->ID()->getText();
+        $symbol = $this->getSymbol($name);
+        if ($symbol === null) return null;
+
+        $this->asm->writeComment("Leer valor a través del puntero (*) '{$name}'");
+
+        $ptrReg = $this->regs->allocate();
+        $this->asm->writeLine("ldr $ptrReg, [x29, #{$symbol->offset}]");
+
+        $valReg = $this->regs->allocate();
+        $elementSize = $this->getSymbolElementSize($symbol);
+        
+        if ($elementSize === 8) {
+            $this->asm->writeLine("ldr $valReg, [$ptrReg]");
+        } else {
+        
+            $wReg = $this->regs->to32($valReg);
+            $this->asm->writeLine("ldr $wReg, [$ptrReg]");
+        }
+
+        $this->regs->free($ptrReg);
+        return $valReg;
     }
 
 }

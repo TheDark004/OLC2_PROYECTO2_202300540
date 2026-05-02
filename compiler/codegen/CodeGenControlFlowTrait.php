@@ -162,7 +162,7 @@ trait CodeGenControlFlowTrait {
         return null;
     }
 
-    public function visitSwitchStmt($ctx) {
+   public function visitSwitchStmt($ctx) {
         $endLabel = $this->labels->newLabel("SW_END");
         $dispatchLabel = $this->labels->newLabel("SW_DISPATCH");
         $defaultLabel = $endLabel;
@@ -221,15 +221,48 @@ trait CodeGenControlFlowTrait {
 
             $caseExprReg = $this->visit($caseCtx->e());
             $caseExprW = $this->regs->to32($caseExprReg);
+            
             if ($switchExprReg !== null) {
-                $this->asm->writeLine("cmp $switchExprW, $caseExprW");
+                // Validación segura con substr para evitar cualquier crash de PHP
+                $isSwitchFloat = substr($switchExprReg, 0, 1) === 's' || substr($switchExprReg, 0, 1) === 'd';
+                $isCaseFloat = substr($caseExprReg, 0, 1) === 's' || substr($caseExprReg, 0, 1) === 'd';
+
+                if ($isSwitchFloat || $isCaseFloat) {
+                    $sReg = $switchExprReg;
+                    $cReg = $caseExprReg;
+                    $freeCReg = false;
+                    $freeSReg = false;
+
+                    if ($isSwitchFloat && !$isCaseFloat) {
+                        $cReg = $this->fregs->allocate();
+                        $this->asm->writeLine("scvtf $cReg, $caseExprW");
+                        $freeCReg = true;
+                    } else if (!$isSwitchFloat && $isCaseFloat) {
+                        $sReg = $this->fregs->allocate();
+                        $this->asm->writeLine("scvtf $sReg, $switchExprW");
+                        $freeSReg = true;
+                    }
+
+                    $this->asm->writeLine("fcmp $sReg, $cReg");
+
+                    if ($freeCReg) $this->fregs->free($cReg);
+                    if ($freeSReg) $this->fregs->free($sReg);
+                } else {
+                    $this->asm->writeLine("cmp $switchExprW, $caseExprW");
+                }
             } else {
                 $this->asm->writeLine("cmp $caseExprW, #0");
             }
+            
             $this->asm->writeLine("b.ne {$entry['nextLabel']}");
             $this->asm->writeLine("b {$entry['bodyLabel']}");
             $this->asm->writeLabel($entry['nextLabel']);
-            $this->regs->free($caseExprReg);
+            
+            if (substr($caseExprReg, 0, 1) === 's' || substr($caseExprReg, 0, 1) === 'd') {
+                $this->fregs->free($caseExprReg);
+            } else {
+                $this->regs->free($caseExprReg);
+            }
         }
 
         $this->asm->writeLine("b $defaultLabel");
@@ -237,7 +270,11 @@ trait CodeGenControlFlowTrait {
         $this->popControlFlowContext();
 
         if ($switchExprReg !== null) {
-            $this->regs->free($switchExprReg);
+            if (substr($switchExprReg, 0, 1) === 's' || substr($switchExprReg, 0, 1) === 'd') {
+                $this->fregs->free($switchExprReg);
+            } else {
+                $this->regs->free($switchExprReg);
+            }
         }
         return null;
     }

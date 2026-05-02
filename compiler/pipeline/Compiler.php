@@ -25,7 +25,7 @@ class Compiler {
             }
 
             // --- GENERACIÓN DE CÓDIGO ---
-            $codegen = new CodeGen($semantic->symbolTable);
+            $codegen = new CodeGen($semantic->symbolTable, $semantic->getFunctionSignatures());
             $codegen->visit($tree);
             $asmCode = $codegen->getOutput();
 

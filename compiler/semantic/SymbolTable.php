@@ -3,15 +3,16 @@
 class Symbol {
     public string $name;
     public string $type;
-    public int $offset; 
+    public int $offset;
     public ?array $arrayDims;
     public bool $isConst;
     public bool $isPointer;
     public string $scope;
     public bool $isParameter;
     public mixed $value;
+    public Scope $scopeObj;
 
-    public function __construct(string $name, string $type, int $offset, ?array $arrayDims = null, bool $isConst = false, bool $isPointer = false, string $scope = 'global', bool $isParameter = false) {
+    public function __construct(string $name, string $type, int $offset, ?array $arrayDims = null, bool $isConst = false, bool $isPointer = false, string $scope = 'global', bool $isParameter = false, Scope $scopeObj) {
         $this->name = $name;
         $this->type = $type;
         $this->offset = $offset;
@@ -20,6 +21,7 @@ class Symbol {
         $this->isPointer = $isPointer;
         $this->scope = $scope;
         $this->isParameter = $isParameter;
+        $this->scopeObj = $scopeObj;
         $this->value = null;
     }
 }
@@ -56,7 +58,7 @@ class Scope {
         }
 
         // 3. Registramos el símbolo
-        $symbol = new Symbol($name, $type, $this->currentStackOffset, $arrayDims, $isConst, $isPointer, $this->name, $isParameter);
+        $symbol = new Symbol($name, $type, $this->currentStackOffset, $arrayDims, $isConst, $isPointer, $this->name, $isParameter, $this);
         $this->symbols[$name] = $symbol;
         
         return $symbol;
@@ -70,6 +72,17 @@ class Scope {
             return $this->parent->getSymbol($name);
         }
         return null;
+    }
+
+    public function isDescendantOf(Scope $scope): bool {
+        $current = $this->parent;
+        while ($current !== null) {
+            if ($current === $scope) {
+                return true;
+            }
+            $current = $current->parent;
+        }
+        return false;
     }
 }
 
@@ -86,6 +99,15 @@ class SymbolTable {
         $newScope = new Scope($name, $this->currentScope);
         $this->currentScope = $newScope;
         $this->allScopes[] = $newScope;
+    }
+
+    public function findScopeByName(string $name): ?Scope {
+        foreach ($this->allScopes as $scope) {
+            if ($scope->name === $name) {
+                return $scope;
+            }
+        }
+        return null;
     }
 
     public function popScope(): void {

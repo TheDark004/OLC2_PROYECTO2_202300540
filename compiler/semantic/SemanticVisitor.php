@@ -6,7 +6,7 @@ class SemanticVisitor extends GolampiBaseVisitor {
     public TypeChecker $typeChecker; 
     public array $errors = [];
     private array $functions = []; // Para el Hoisting de funciones
-    private array $functionSignatures = [];
+    public array $functionSignatures = [];
     private array $currentFunctionReturns = [];
 
     public function __construct() {
@@ -75,23 +75,21 @@ class SemanticVisitor extends GolampiBaseVisitor {
         $previousReturns = $this->currentFunctionReturns;
         $this->currentFunctionReturns = $this->getReturnTypes($ctx);
         
-        // Al entrar a una función, se reinicia el offset en 0
+       
         $this->symbolTable->pushScope($funcName);
 
-        // Procesar parámetros si existen
+     
         if ($ctx->param() !== null) {
             foreach ($ctx->param() as $paramCtx) {
-                $this->visit($paramCtx);
+                $this->procesarParametroGeneral($paramCtx);
             }
         }
 
-        // Visitar el cuerpo de la función (bloque)
+       
         $this->visit($ctx->block());
 
-        // Calcular y guardar la alineación de 16 bytes obligatoria para ARM64
+    
         $this->symbolTable->calculateAlignedStackSize($funcName);
-
-        // Salir del scope de la función
         $this->symbolTable->popScope();
         $this->currentFunctionReturns = $previousReturns;
     }
@@ -162,14 +160,7 @@ class SemanticVisitor extends GolampiBaseVisitor {
     }
 
     public function visitParametro($ctx) {
-        $name = $ctx->ID()->getText();
-        $type = $ctx->type_()->getText();
-        try {
-            
-            $this->symbolTable->getCurrentScope()->addSymbol($name, $type, null, false, false, true);
-        } catch (\Exception $e) {
-            $this->addError($e->getMessage(), $ctx);
-        }
+        $this->procesarParametroGeneral($ctx);
         return null;
     }
 
@@ -305,17 +296,27 @@ class SemanticVisitor extends GolampiBaseVisitor {
 
     
     public function visitParametroArrayND($ctx) {
+        $this->procesarParametroGeneral($ctx);
+        return null;
+    }
+
+    private function procesarParametroGeneral($ctx) {
         $name = $ctx->ID()->getText();
         
-       
-        $rawType = $ctx->arrayType()->getText() . $ctx->type_()->getText();
+        $rawType = $this->paramTypeToText($ctx);
         
-       
         list($baseType, $dims) = $this->extractDimsAndType($rawType);
-
         
-        $this->symbolTable->getCurrentScope()->addSymbol($name, $baseType, $dims, false, false, true);
-        return null;
+        $isPointer = str_starts_with($rawType, '*');
+        
+        $baseType = str_replace('*', '', $baseType);
+
+        try {
+    
+            $this->symbolTable->getCurrentScope()->addSymbol($name, $baseType, $dims, false, $isPointer, true);
+        } catch (\Exception $e) {
+            $this->addError($e->getMessage(), $ctx);
+        }
     }
 
     // Función ayudante para extraer dimensiones de un string de tipo
@@ -331,7 +332,66 @@ class SemanticVisitor extends GolampiBaseVisitor {
         return [$rawType, null];
     }
 
+   
+    public function visitDerefExpr($ctx) {
+        $name = $ctx->ID()->getText();
+        $symbol = $this->symbolTable->getCurrentScope()->getSymbol($name);
+
+        if ($symbol === null) {
+            $this->addError("La variable '{$name}' no ha sido declarada en este ámbito.", $ctx);
+            return 'unknown';
+        }
+
+        if (!$this->isSymbolPointer($symbol)) {
+            $this->addError("No se puede desreferenciar '{$name}' porque no es un puntero.", $ctx);
+            return 'unknown';
+        }
+
+        return $this->getSymbolBaseTypeString($symbol);
+    }
+
+    public function visitRefExpr($ctx) {
+        $name = $ctx->ID()->getText();
+        $symbol = $this->symbolTable->getCurrentScope()->getSymbol($name);
+
+        if ($symbol === null) {
+            $this->addError("La variable '{$name}' no ha sido declarada en este ámbito.", $ctx);
+            return 'unknown';
+        }
+
+        $typeStr = $this->getSymbolTypeString($symbol);
+        return '*' . ltrim($typeStr, '*');
+    }
+
     // --- VERIFICACIONES DE USO ---
+
+    private function getSymbolTypeString($symbol): string {
+        $typeStr = $symbol->type;
+
+        if (!empty($symbol->arrayDims)) {
+            $arrayStr = '';
+            foreach ($symbol->arrayDims as $dim) {
+                $arrayStr .= "[$dim]";
+            }
+            $typeStr = $arrayStr . $typeStr;
+        }
+
+        if ($this->isSymbolPointer($symbol) && !str_starts_with($typeStr, '*')) {
+            $typeStr = '*' . $typeStr;
+        }
+
+        return $typeStr;
+    }
+
+    private function getSymbolBaseTypeString($symbol): string {
+        $typeStr = $this->getSymbolTypeString($symbol);
+        $typeStr = ltrim($typeStr, '*');
+        return preg_replace('/^(?:\[\d+\])+/','', $typeStr);
+    }
+
+    private function isSymbolPointer($symbol): bool {
+        return (property_exists($symbol, 'isPointer') && $symbol->isPointer) || str_starts_with($symbol->type, '*');
+    }
 
     public function visitIdExpr($ctx) {
         $name = $ctx->ID()->getText();
@@ -341,34 +401,36 @@ class SemanticVisitor extends GolampiBaseVisitor {
             $this->addError("La variable '{$name}' no ha sido declarada en este ámbito.", $ctx);
             return 'unknown';
         }
-        if (!empty($symbol->arrayDims)) {
-            $arrayTypeStr = '';
-            foreach ($symbol->arrayDims as $dim) {
-                $arrayTypeStr .= "[$dim]";
-            }
-            return $arrayTypeStr . $symbol->type;
-        }
-
-        return $symbol->type;
+        
+        return $this->getSymbolTypeString($symbol);
     }
-
     public function visitAssignStmt($ctx) {
-        $name = $ctx->ID()->getText();
-        $symbol = $this->symbolTable->getCurrentScope()->getSymbol($name);
-        
-        if ($symbol === null) {
-            $this->addError("No se puede asignar a '{$name}' porque no está declarada.", $ctx);
-            return 'unknown';
-        } elseif ($symbol->isConst) {
-            $this->addError("No se puede modificar el valor de la constante '{$name}'.", $ctx);
-            return 'unknown';
+        if ($ctx->ID() !== null) {
+            $name = $ctx->ID()->getText();
+            $symbol = $this->symbolTable->getCurrentScope()->getSymbol($name);
+            
+            if ($symbol === null) {
+                $this->addError("No se puede asignar a '{$name}' porque no está declarada.", $ctx);
+                return 'unknown';
+            } elseif ($symbol->isConst) {
+                $this->addError("No se puede modificar el valor de la constante '{$name}'.", $ctx);
+                return 'unknown';
+            }
+
+            $rightType = $this->typeForSingleValue($this->visit($ctx->e()), $ctx);
+            $expectedType = $this->getSymbolTypeString($symbol);
+            
+            if ($rightType !== 'unknown' && !$this->typeChecker->checkAssignment($expectedType, $rightType)) {
+                $this->addError("Error de tipos: No se puede asignar '{$rightType}' a '{$name}' que es de tipo '{$expectedType}'.", $ctx);
+            }
+            return null;
         }
 
-        // tipos en la asignación (=)
-        $rightType = $this->typeForSingleValue($this->visit($ctx->e()), $ctx);
-        
-        if ($rightType !== 'unknown' && !$this->typeChecker->checkAssignment($symbol->type, $rightType)) {
-            $this->addError("Error de tipos: No se puede asignar '{$rightType}' a '{$name}' que es de tipo '{$symbol->type}'.", $ctx);
+     
+        if (method_exists($ctx, 'derefExpr') && $ctx->derefExpr() !== null) {
+           
+            $this->visit($ctx->e());
+            return null;
         }
 
         return null;
@@ -388,7 +450,7 @@ class SemanticVisitor extends GolampiBaseVisitor {
             return 'unknown';
         }
 
-        return $symbol->type;
+        return $this->getSymbolBaseTypeString($symbol);
     }
 
     public function visitArrayAssignND($ctx) {
@@ -409,8 +471,9 @@ class SemanticVisitor extends GolampiBaseVisitor {
         $valueExpr = $exprs[count($exprs) - 1] ?? null;
         if ($valueExpr !== null) {
             $rightType = $this->typeForSingleValue($this->visit($valueExpr), $valueExpr);
-            if ($rightType !== 'unknown' && !$this->typeChecker->checkAssignment($symbol->type, $rightType)) {
-                $this->addError("Error de tipos: no se puede asignar '{$rightType}' a un elemento de '{$name}' que es de tipo '{$symbol->type}'.", $ctx);
+            $expectedType = $this->getSymbolBaseTypeString($symbol);
+            if ($rightType !== 'unknown' && !$this->typeChecker->checkAssignment($expectedType, $rightType)) {
+                $this->addError("Error de tipos: no se puede asignar '{$rightType}' a un elemento de '{$name}' que es de tipo '{$expectedType}'.", $ctx);
             }
         }
 
@@ -514,6 +577,10 @@ class SemanticVisitor extends GolampiBaseVisitor {
         }
 
         return count($returnTypes) === 1 ? $returnTypes[0] : $returnTypes;
+    }
+
+    public function getFunctionSignatures(): array {
+        return $this->functionSignatures;
     }
 
     public function visitMultiShortVarDecl($ctx) {

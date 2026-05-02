@@ -223,9 +223,7 @@ e
     | RUNE_LIT                                              # RuneLit
     | 'nil'                                                 # NilLit
 
-    // ── Acceso a arreglo N-D: a[i], a[i][j], a[i][j][k]… ─
-    //  Nota: debe ir ANTES de IdExpr para que el parser lo
-    //  reconozca correctamente cuando hay corchetes.
+   
     | ID ('[' e ']')+                                       # ArrayAccessND
 
     //  Variable 

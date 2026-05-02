@@ -1,0 +1,11 @@
+vendor/
+composer.lock
+tmp/*.s
+tmp/*.o
+tmp/program
+test/
+src/
+Proyecto.md
+Proyecto 2 - 1 Sem 2026.pdf
+PENDING_FIXES.md
+ORGANIZACION DE LENGUAJES Y COMPILADORES 2.pdf
