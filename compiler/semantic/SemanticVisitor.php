@@ -855,8 +855,24 @@ class SemanticVisitor extends GolampiBaseVisitor {
 
         foreach ($actualTypes as $i => $actualType) {
             $expectedType = $this->currentFunctionReturns[$i] ?? null;
-            if ($expectedType !== null && $actualType !== 'unknown' && !$this->typeChecker->checkAssignment($expectedType, $actualType)) {
-                $this->addError("Return inválido en valor " . ($i + 1) . ": se esperaba '{$expectedType}' y se recibió '{$actualType}'.", $ctx);
+            
+            if ($expectedType !== null && $actualType !== 'unknown') {
+                // 1. Verificamos con tu TypeChecker normal
+                $isValid = $this->typeChecker->checkAssignment($expectedType, $actualType);
+                
+                // 2. MAGIA: Si falla, verificamos si son "hermanos" de la familia int
+                if (!$isValid) {
+                    $isIntFamily = ($expectedType === 'int' || $expectedType === 'int32') && 
+                                   ($actualType === 'int' || $actualType === 'int32');
+                    if ($isIntFamily) {
+                        $isValid = true; // Lo perdonamos y lo damos por válido
+                    }
+                }
+
+                // 3. Si definitivamente no es válido, lanzamos el error
+                if (!$isValid) {
+                    $this->addError("Return inválido en valor " . ($i + 1) . ": se esperaba '{$expectedType}' y se recibió '{$actualType}'.", $ctx);
+                }
             }
         }
 
@@ -915,5 +931,29 @@ class SemanticVisitor extends GolampiBaseVisitor {
 
     public function visitForAssignPost($ctx) {
         return $this->visitAssignStmt($ctx);
+    }
+
+    public function visitTernaryExpr($ctx) {
+        
+        $condType = $this->visit($ctx->e(0));
+        if (is_array($condType)) $condType = $condType[0]; 
+        
+        if ($condType !== 'bool' && $condType !== 'unknown') {
+            $this->addError("La condición del operador ternario debe ser 'bool', se encontró '{$condType}'.", $ctx);
+        }
+
+  
+        $type1 = $this->visit($ctx->e(1));
+        if (is_array($type1)) $type1 = $type1[0];
+
+        $type2 = $this->visit($ctx->e(2));
+        if (is_array($type2)) $type2 = $type2[0];
+
+        if ($type1 !== 'unknown' && $type2 !== 'unknown' && $type1 !== $type2) {
+            $this->addError("Los tipos del operador ternario no coinciden: '{$type1}' y '{$type2}'.", $ctx);
+            return 'unknown';
+        }
+
+        return $type1;
     }
 }

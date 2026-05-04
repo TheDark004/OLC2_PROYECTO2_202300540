@@ -605,4 +605,53 @@ trait CodeGenExprTrait {
         return $valReg;
     }
 
+    public function visitTernaryExpr($ctx) {
+        $this->asm->writeComment("--- Operador Ternario (cond ? e1 : e2) ---");
+        
+      
+        $condReg = $this->visit($ctx->e(0));
+        $condW = $this->regs->to32($condReg);
+
+        $falseLabel = $this->labels->newLabel("TERNARY_FALSE");
+        $endLabel = $this->labels->newLabel("TERNARY_END");
+
+        $this->asm->writeLine("cmp $condW, #0");
+        $this->regs->free($condReg); 
+        
+        
+        $this->asm->writeLine("b.eq $falseLabel");
+
+       
+        $resReg1 = $this->visit($ctx->e(1));
+        
+    
+        $isFloat = str_starts_with($resReg1, 's') || str_starts_with($resReg1, 'd');
+        $finalReg = $isFloat ? $this->fregs->allocate() : $this->regs->allocate();
+
+        if ($isFloat) {
+            $this->asm->writeLine("fmov $finalReg, $resReg1");
+            $this->fregs->free($resReg1);
+        } else {
+            $this->asm->writeLine("mov $finalReg, $resReg1");
+            $this->regs->free($resReg1);
+        }
+        
+        $this->asm->writeLine("b $endLabel");
+
+        $this->asm->writeLabel($falseLabel);
+        $resReg2 = $this->visit($ctx->e(2));
+        
+        if ($isFloat) {
+            $this->asm->writeLine("fmov $finalReg, $resReg2");
+            $this->fregs->free($resReg2);
+        } else {
+            $this->asm->writeLine("mov $finalReg, $resReg2");
+            $this->regs->free($resReg2);
+        }
+
+        $this->asm->writeLabel($endLabel);
+
+        return $finalReg;
+    }
+
 }
