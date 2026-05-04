@@ -28,14 +28,14 @@ trait CodeGenPrintTrait {
     }
 
     private function emitPrintFloatReg(string $reg): void {
-        // Detectar si es float register
+        $this->asm->writeComment("--- Print float ---");
+        $this->emitSaveVolatiles();
+        
         $isFloatReg = str_starts_with($reg, 's') || str_starts_with($reg, 'd');
+        $endLabel = $this->labels->newLabel('FLT_END');
+
         
         if ($isFloatReg) {
-            // Para float registers, usar fcmp
-            $matchLabel = $this->labels->newLabel('FLT_MATCH');
-            $endLabel = $this->labels->newLabel('FLT_END');
-
             foreach ($this->floatLiterals as $meta) {
                 $nextLabel = $this->labels->newLabel('FLT_NEXT');
                 $tmpAddr = $this->regs->allocate();
@@ -45,27 +45,25 @@ trait CodeGenPrintTrait {
                 $this->asm->writeLine("adrp $tmpAddr, {$meta['bitsLabel']}");
                 $this->asm->writeLine("add  $tmpAddr, $tmpAddr, :lo12:{$meta['bitsLabel']}");
                 $this->asm->writeLine("ldr " . $this->regs->to32($tmpVal) . ", [$tmpAddr]");
-                // Convertir int bits a float para comparación
                 $this->asm->writeLine("fmov $tmpFloat, " . $this->regs->to32($tmpVal));
                 $this->asm->writeLine("fcmp $reg, $tmpFloat");
                 $this->asm->writeLine("b.ne $nextLabel");
+                
+                
                 $this->emitWriteLabel($meta['strLabel'], strlen($meta['display']));
+                $this->regs->free($tmpAddr);
+                $this->regs->free($tmpVal);
+                $this->fregs->free($tmpFloat);
                 $this->asm->writeLine("b $endLabel");
+                
+           
                 $this->asm->writeLabel($nextLabel);
-
                 $this->regs->free($tmpAddr);
                 $this->regs->free($tmpVal);
                 $this->fregs->free($tmpFloat);
             }
-
-            $this->emitWriteLabel('str_float_unknown', 7);
-            $this->asm->writeLabel($endLabel);
         } else {
-            // Para integer registers (legacy path)
             $wReg = $this->regs->to32($reg);
-            $matchLabel = $this->labels->newLabel('FLT_MATCH');
-            $endLabel = $this->labels->newLabel('FLT_END');
-
             foreach ($this->floatLiterals as $meta) {
                 $nextLabel = $this->labels->newLabel('FLT_NEXT');
                 $tmpAddr = $this->regs->allocate();
@@ -77,16 +75,105 @@ trait CodeGenPrintTrait {
                 $this->asm->writeLine("ldr $tmpW, [$tmpAddr]");
                 $this->asm->writeLine("cmp $wReg, $tmpW");
                 $this->asm->writeLine("b.ne $nextLabel");
+                
+               
                 $this->emitWriteLabel($meta['strLabel'], strlen($meta['display']));
+                $this->regs->free($tmpAddr);
+                $this->regs->free($tmpVal);
                 $this->asm->writeLine("b $endLabel");
+                
+           
                 $this->asm->writeLabel($nextLabel);
-
                 $this->regs->free($tmpAddr);
                 $this->regs->free($tmpVal);
             }
+        }
 
-            $this->emitWriteLabel('str_float_unknown', 7);
-            $this->asm->writeLabel($endLabel);
+        
+        if ($reg !== 's0') {
+            if ($isFloatReg) {
+                $this->asm->writeLine("fmov s0, $reg");
+            } else {
+                $this->asm->writeLine("fmov s0, " . $this->regs->to32($reg));
+            }
+        }
+
+        $this->asm->writeLine("fcvtzs w20, s0"); 
+
+        $lPos = $this->labels->newLabel('FLOAT_POS');
+        $this->asm->writeLine("fcmp s0, #0.0");
+        $this->asm->writeLine("b.ge $lPos");
+        $this->asm->writeLine("cmp w20, #0");
+        $this->asm->writeLine("b.ne $lPos");
+        
+        $this->asm->writeLine("mov w0, #45"); 
+        $this->asm->writeLine("str w0, [sp, -16]!");
+        $this->asm->writeLine("mov x0, #1");
+        $this->asm->writeLine("mov x1, sp");
+        $this->asm->writeLine("mov x2, #1");
+        $this->asm->writeLine("mov x8, #64");
+        $this->asm->writeLine("svc #0");
+        $this->asm->writeLine("add sp, sp, 16");
+        
+        $this->asm->writeLabel($lPos);
+
+        $this->asm->writeLine("mov w0, w20");
+        $this->asm->writeLine("bl print_int");
+        
+        $this->asm->writeLine("mov w0, #46");
+        $this->asm->writeLine("str w0, [sp, -16]!");
+        $this->asm->writeLine("mov x0, #1");
+        $this->asm->writeLine("mov x1, sp");
+        $this->asm->writeLine("mov x2, #1");
+        $this->asm->writeLine("mov x8, #64");
+        $this->asm->writeLine("svc #0");
+        $this->asm->writeLine("add sp, sp, 16");
+
+        $this->asm->writeLine("scvtf s1, w20");
+        $this->asm->writeLine("fsub s0, s0, s1");
+        $this->asm->writeLine("fabs s0, s0");
+        
+        $this->asm->writeLine("mov w21, #0x0000");
+        $this->asm->writeLine("movk w21, #0x4120, lsl #16");
+        $this->asm->writeLine("fmov s2, w21");
+
+        for ($i = 0; $i < 4; $i++) {
+            $this->asm->writeLine("fmul s0, s0, s2"); 
+            $this->asm->writeLine("fcvtzs w20, s0");   
+
+            $this->asm->writeLine("str s0, [sp, -16]!");
+            $this->asm->writeLine("str s2, [sp, -16]!");
+            
+            $this->asm->writeLine("mov w0, w20");
+            $this->asm->writeLine("bl print_int");
+            
+            $this->asm->writeLine("ldr s2, [sp], 16");
+            $this->asm->writeLine("ldr s0, [sp], 16");
+
+            $this->asm->writeLine("scvtf s1, w20");
+            $this->asm->writeLine("fsub s0, s0, s1"); 
+        }
+
+        $this->asm->writeLabel($endLabel);
+        $this->emitRestoreVolatiles();
+    }
+
+    private function emitSaveVolatiles(): void {
+        $this->asm->writeComment("Guardar registros volatiles (Evitar Segfault)");
+        
+        for ($i = 1; $i <= 15; $i++) {
+            
+            $this->asm->writeLine("str x$i, [sp, -16]!"); 
+            $this->asm->writeLine("str s$i, [sp, -16]!");
+        }
+    }
+
+    private function emitRestoreVolatiles(): void {
+        $this->asm->writeComment("Restaurar registros volatiles");
+        for ($i = 15; $i >= 1; $i--) {
+            // Restaurar en orden inverso
+            $this->asm->writeLine("ldr s$i, [sp], 16");
+            $this->asm->writeLine("ldr x$i, [sp], 16");
         }
     }
 
@@ -114,9 +201,20 @@ trait CodeGenPrintTrait {
         return null;
     }
 
+
+    private function freeAnyReg(string $reg): void {
+        if ($reg === null) return;
+        if (str_starts_with($reg, 's') || str_starts_with($reg, 'd')) {
+            $this->fregs->free($reg);
+        } else {
+            $this->regs->free($reg);
+        }
+    }
+
     // Emite código de impresión para UN argumento de Println.
     private function emitPrintExpr($expr): void {
         $exprText = method_exists($expr, 'getText') ? $expr->getText() : '';
+        $class = get_class($expr); 
 
         // String literal: "Hola"
         if (strlen($exprText) >= 2 && $exprText[0] === '"' && substr($exprText, -1) === '"') {
@@ -131,87 +229,106 @@ trait CodeGenPrintTrait {
         // Bool literal: true / false
         if ($exprText === 'true' || $exprText === 'false') {
             if ($exprText === 'true') {
-                $this->asm->writeComment("print bool literal: true");
                 $this->emitWriteLabel('str_true', 4);
             } else {
-                $this->asm->writeComment("print bool literal: false");
                 $this->emitWriteLabel('str_false', 5);
             }
             return;
         }
 
         if ($exprText === 'nil') {
-            $this->asm->writeComment("print nil literal");
             $this->emitWriteLabel('str_nil', 5);
             return;
         }
 
         if ($this->isFloatLiteralText($exprText) || $this->getExprType($expr) === 'float32') {
             $reg = $this->visit($expr);
-            $this->asm->writeComment("print float expr");
             $this->emitPrintFloatReg($reg);
-            $this->regs->free($reg);
+            
+            
+            $this->freeAnyReg($reg);
             return;
         }
 
         if ($this->isBoolExpr($expr)) {
             $reg = $this->visit($expr);
-            $this->asm->writeComment("print bool expr");
             $this->emitPrintBoolReg($reg);
-            $this->regs->free($reg);
+            $this->freeAnyReg($reg);
             return;
         }
 
-        // Variable: despachar según tipo en tabla de símbolos
-        if (method_exists($expr, 'ID') && $expr->ID() !== null) {
+     
+        if (str_ends_with($class, 'IdExprContext')) {
             $name   = $expr->ID()->getText();
             $symbol = $this->getSymbol($name);
 
             if ($symbol !== null) {
-                // Bool: leer 0/1 y elegir "true" o "false"
                 if ($symbol->type === 'bool') {
                     $reg = $this->visit($expr);
-                    $this->asm->writeComment("print bool var '$name'");
                     $this->emitPrintBoolReg($reg);
-                    $this->regs->free($reg);
+                    $this->freeAnyReg($reg);
                     return;
                 }
-
-                // String: ya tiene la dirección guardada en stack
                 if ($symbol->type === 'string') {
                     $reg = $this->visit($expr);
-                    $this->asm->writeComment("print string var '$name'");
-                    $this->asm->writeLine("mov x0, $reg");
+                    $this->asm->writeLine("mov x0, $reg"); 
+                    $this->emitSaveVolatiles();   
                     $this->asm->writeLine("bl print_cstr");
-                    $this->regs->free($reg);
+                    $this->emitRestoreVolatiles(); 
+                    $this->freeAnyReg($reg);
                     return;
                 }
-
                 if ($symbol->type === 'float32') {
                     $reg = $this->visit($expr);
-                    $this->asm->writeComment("print float var '$name'");
                     $this->emitPrintFloatReg($reg);
-                    $this->regs->free($reg);
+                    
+                    
+                    $this->freeAnyReg($reg);
                     return;
                 }
             }
 
-            // int32 / rune / float32 -> print_int
+            // int32 / rune / fallback
             $reg = $this->visit($expr);
             $this->asm->writeComment("print int var '$name'");
             $this->asm->writeLine("mov w0, " . $this->regs->to32($reg));
+            $this->emitSaveVolatiles();   
             $this->asm->writeLine("bl print_int");
-            $this->regs->free($reg);
+            $this->emitRestoreVolatiles(); 
+            $this->freeAnyReg($reg);
             return;
         }
 
-        // Cualquier otra expresión -> se evalúa y se trata como int.
+      
         $reg = $this->visit($expr);
+        
         if ($reg !== null) {
-            $this->asm->writeComment("print expr");
-            $this->asm->writeLine("mov w0, " . $this->regs->to32($reg));
-            $this->asm->writeLine("bl print_int");
-            $this->regs->free($reg);
+            $exprType = $this->getExprType($expr);
+            
+            // Forzamos "string" por si falla el getExprType
+            if (str_starts_with($exprText, 'typeof(') || 
+                str_starts_with($exprText, 'now(') || 
+                str_starts_with($exprText, 'substr(')) {
+                $exprType = 'string';
+            }
+
+            if ($exprType === 'string') {
+                $this->asm->writeComment("print string expr/func");
+                // Usamos $reg directamente
+                $this->asm->writeLine("mov x0, $reg");
+                $this->emitSaveVolatiles();   
+                $this->asm->writeLine("bl print_cstr");
+                $this->emitRestoreVolatiles();
+            } else {
+                $this->asm->writeComment("print int expr/func");
+                // Para los enteros seguimos usando to32 como tú lo tenías
+                $this->asm->writeLine("mov w0, " . $this->regs->to32($reg));
+                $this->emitSaveVolatiles();   
+                $this->asm->writeLine("bl print_int");
+                $this->emitRestoreVolatiles(); 
+            }
+            
+            $this->freeAnyReg($reg);
         }
     }
 }

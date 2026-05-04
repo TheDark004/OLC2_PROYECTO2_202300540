@@ -8,18 +8,20 @@ trait CodeGenExprTrait {
 
         if (!empty($symbol->arrayDims)) {
             $reg = $this->regs->allocate();
-            if ($symbol->isParameter) {
-                // Si nosotros ya lo recibimos como puntero, pasamos ese mismo puntero
+            
+            $isPointer = (property_exists($symbol, 'isPointer') && $symbol->isPointer) || str_contains((string)$symbol->type, '*');
+            $isFloatArray = str_contains((string)$symbol->type, 'float');
+
+            if ($isPointer) {
+                $this->asm->writeLine("ldr $reg, [x29, #{$symbol->offset}]");
+            } else if ($symbol->isParameter && !empty($symbol->arrayDims) && !$isFloatArray) {
                 $this->asm->writeLine("ldr $reg, [x29, #{$symbol->offset}]");
             } else {
-                // Si es local nuestro, pasamos su dirección de memoria
                 $this->emitFrameAddress($reg, $symbol->offset);
             }
             return $reg;
         }
-
-        // Resto normal de lectura de variables
-        // Si es float32, cargarlo en float register
+        
         if ($symbol->type === 'float32') {
             $reg = $this->fregs->allocate();
             $this->asm->writeComment("Leer variable float '$name'");
@@ -46,15 +48,23 @@ trait CodeGenExprTrait {
         if ($symbol === null) return null;
 
         $indexExprs = $ctx->e();
-        
         $this->asm->writeComment("Lectura de arreglo ND: {$name}");
         
         $baseReg = $this->computeArrayElementAddress($symbol, $indexExprs);
 
+        
+        $isFloatArray = str_contains((string)$symbol->type, 'float');
+        if ($isFloatArray) {
+            $valReg = $this->fregs->allocate();
+            $this->asm->writeLine("ldr $valReg, [$baseReg]");
+            $this->regs->free($baseReg);
+            return $valReg;
+        }
+
+        
         $valReg = $this->regs->allocate();
         $elementSize = $this->getSymbolElementSize($symbol);
 
-       
         if ($elementSize === 8) {
             $this->asm->writeLine("ldr $valReg, [$baseReg]");
         } else {
@@ -152,10 +162,10 @@ trait CodeGenExprTrait {
             $name = $ctx->ID()->getText();
             
             // Detectar builtins
-            if (in_array($name, ['len', 'now'], true)) {
+            if ($name === 'len') {
                 return 'int32';
             }
-            if (in_array($name, ['typeof', 'substr'], true)) {
+            if (in_array($name, ['typeof', 'substr', 'now'], true)) {
                 return 'string';
             }
             

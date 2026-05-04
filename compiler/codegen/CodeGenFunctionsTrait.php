@@ -167,22 +167,19 @@ trait CodeGenFunctionsTrait {
         $name   = $ctx->ID()->getText();
         $exprs  = $ctx->e() ?? [];
 
+        if ($name === 'len')    return $this->handleLen($exprs);
+        if ($name === 'typeof') return $this->handleTypeOf($exprs);
+        if ($name === 'now')    return $this->handleNow();
+        if ($name === 'substr') return $this->handleSubstr($exprs);
+
         $this->emitFuncCall($name, $exprs, true);
 
-        // Detectar tipo de retorno para builtins
-        if ($this->isBuiltin($name)) {
-            $returnType = match($name) {
-                'len', 'now' => 'int32',
-                'typeof', 'substr' => 'string',
-                default => 'int32'
-            };
-        } else {
-            $returnType = 'int32';
-            if (isset($this->functionSignatures[$name])) {
-                $returns = $this->functionSignatures[$name]['returns'] ?? [];
-                if (count($returns) > 0) {
-                    $returnType = $returns[0];
-                }
+      
+        $returnType = 'int32';
+        if (isset($this->functionSignatures[$name])) {
+            $returns = $this->functionSignatures[$name]['returns'] ?? [];
+            if (count($returns) > 0) {
+                $returnType = $returns[0];
             }
         }
 
@@ -198,6 +195,98 @@ trait CodeGenFunctionsTrait {
             return $reg;
         }
     }
+
+    private function handleLen($exprs) {
+        $this->asm->writeComment("---  len() ---");
+        $exprCtx = $exprs[0];
+        
+        $class = get_class($exprCtx);
+        if (str_ends_with($class, 'IdExprContext')) {
+            $symName = $exprCtx->ID()->getText();
+            $symbol = $this->getSymbol($symName);
+            if ($symbol !== null && !empty($symbol->arrayDims)) {
+                $reg = $this->regs->allocate();
+                $this->asm->writeLine("mov " . $this->regs->to32($reg) . ", #" . $symbol->arrayDims[0]);
+                return $reg;
+            }
+        }
+
+        $strReg = $this->visit($exprCtx);
+        $resReg = $this->regs->allocate();
+        
+        $loopLabel = $this->labels->newLabel("strlen_loop");
+        $endLabel  = $this->labels->newLabel("strlen_end");
+        
+        $this->asm->writeLine("mov " . $this->regs->to32($resReg) . ", #0"); // Contador a 0
+        
+        $this->asm->writeLine("$loopLabel:");
+        $this->asm->writeLine("ldrb w8, [$strReg, $resReg]");
+        $this->asm->writeLine("cbz w8, $endLabel"); // Si es \0, salir del bucle
+        $this->asm->writeLine("add " . $this->regs->to32($resReg) . ", " . $this->regs->to32($resReg) . ", #1");
+        $this->asm->writeLine("b $loopLabel");
+        
+        $this->asm->writeLine("$endLabel:");
+        
+        $this->regs->free($strReg);
+        return $resReg;
+    }
+
+    private function handleTypeOf($exprs) {
+        $this->asm->writeComment("--- typeof() ---");
+        $exprCtx = $exprs[0];
+        
+        
+        $typeStr = $this->getExprType($exprCtx);
+
+        $label = $this->labels->newLabel("TYPE_STR");
+        
+        $this->asm->writeLine(".data");
+        $this->asm->writeLine("$label: .asciz \"$typeStr\"");
+        $this->asm->writeLine(".align 3");
+        $this->asm->writeLine(".text");
+
+        $reg = $this->regs->allocate();
+        $this->asm->writeLine("adrp $reg, $label");
+        $this->asm->writeLine("add $reg, $reg, :lo12:$label");
+        return $reg;
+    }
+
+    private function handleNow() {
+        $this->asm->writeComment("---  now() ---");
+        
+        
+        $this->asm->writeLine("mov x0, #0");
+        $this->asm->writeLine("bl time");
+        
+       
+        $this->asm->writeLine("sub sp, sp, #16");
+        $this->asm->writeLine("str x0, [sp]");
+        $this->asm->writeLine("mov x0, sp");
+        $this->asm->writeLine("bl ctime"); // Retorna en x0 el puntero al string de la fecha
+        $this->asm->writeLine("add sp, sp, #16"); // Restaurar pila
+        
+        $reg = $this->regs->allocate();
+        $this->asm->writeLine("mov $reg, x0");
+        return $reg;
+    }
+
+    private function handleSubstr($exprs) {
+        $this->asm->writeComment("---  substr() ---");
+       
+        $strReg = $this->visit($exprs[0]);
+        $startReg = $this->visit($exprs[1]);
+        $lenReg = $this->visit($exprs[2]); 
+        $resReg = $this->regs->allocate();
+      
+        
+        $this->asm->writeLine("add $resReg, $strReg, $startReg");
+        
+        $this->regs->free($strReg);
+        $this->regs->free($startReg);
+        $this->regs->free($lenReg);
+        
+        return $resReg;
+    }
     
 
     private function emitFuncCall(string $name, array $exprs, bool $preserveReturn = false): void {
@@ -209,7 +298,7 @@ trait CodeGenFunctionsTrait {
             return;
         }
 
-        // Solo permitir hasta 8 argumentos (ARM64 ABI estándar)
+        // Solo permitir hasta 8 argumentos 
         $numArgs = min(count($exprs), 8);
         
         // Registros que se van a usar para argumentos
@@ -237,7 +326,13 @@ trait CodeGenFunctionsTrait {
                     $this->asm->writeLine("mov x$i, $reg");
                 }
             }
-            $this->regs->free($reg);
+            
+        
+            if (str_starts_with($reg, 's') || str_starts_with($reg, 'd')) {
+                $this->fregs->free($reg);
+            } else {
+                $this->regs->free($reg);
+            }
         }
 
         $this->asm->writeLine("bl $name");

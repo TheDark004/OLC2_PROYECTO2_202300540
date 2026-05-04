@@ -116,17 +116,19 @@ trait CodeGenAssignmentsTrait {
     private function computeArrayElementAddress($symbol, array $indexExprs): string {
         $baseReg = $this->regs->allocate();
         
-        
-        $isPointer = (property_exists($symbol, 'isPointer') && $symbol->isPointer) || 
-                     str_contains((string)$symbol->type, '*');
+        $isPointer = (property_exists($symbol, 'isPointer') && $symbol->isPointer) || str_contains((string)$symbol->type, '*');
+        $isFloatArray = str_contains((string)$symbol->type, 'float');
 
         if ($isPointer) {
             $this->asm->writeComment("Cargar puntero base del arreglo referenciado '{$symbol->name}'");
             $this->asm->writeLine("ldr $baseReg, [x29, #{$symbol->offset}]");
-        } else if ($symbol->isParameter && !empty($symbol->arrayDims)) {
-            $this->asm->writeComment("Cargar puntero base del arreglo parámetro '{$symbol->name}'");
+        } else if ($symbol->isParameter && !empty($symbol->arrayDims) && !$isFloatArray) {
+            
+            $this->asm->writeComment("Dereferenciar arreglo entero parámetro '{$symbol->name}'");
             $this->asm->writeLine("ldr $baseReg, [x29, #{$symbol->offset}]");
         } else {
+            
+            $this->asm->writeComment("Cargar base del arreglo local/float '{$symbol->name}'");
             $this->emitFrameAddress($baseReg, $symbol->offset);
         }
 
@@ -156,8 +158,7 @@ trait CodeGenAssignmentsTrait {
             $this->regs->free($sizeReg);
         }
 
-       
-        $this->asm->writeLine("add $baseReg, $baseReg, $linearReg");
+        $this->asm->writeLine("sub $baseReg, $baseReg, $linearReg");
         $this->regs->free($linearReg);
         return $baseReg;
     }
@@ -297,8 +298,14 @@ trait CodeGenAssignmentsTrait {
             $this->asm->writeLine("str $wReg, [$baseReg]");
         }
 
-        $this->regs->free($baseReg);
-        $this->regs->free($valReg);
+       $this->regs->free($baseReg);
+        
+        if (str_starts_with($valReg, 's') || str_starts_with($valReg, 'd')) {
+            $this->fregs->free($valReg);
+        } else {
+            $this->regs->free($valReg);
+        }
+        
         return null;
     }
 
@@ -339,12 +346,16 @@ trait CodeGenAssignmentsTrait {
             $totalBytes = SymbolTable::getTypeSize($symbol->type, $symbol->arrayDims, false);
             $this->emitMemcpy($symbol->offset, $reg, $totalBytes);
         } else {
-            
             $this->asm->writeComment("Guardar '$name' en [x29, {$symbol->offset}]");
             $this->storeRegisterInFrameOffset($symbol, $symbol->offset, $reg);
         }
 
-        $this->regs->free($reg);
+        if (str_starts_with($reg, 's') || str_starts_with($reg, 'd')) {
+            $this->fregs->free($reg);
+        } else {
+            $this->regs->free($reg);
+        }
+
         return null;
     }
 
@@ -377,11 +388,45 @@ trait CodeGenAssignmentsTrait {
         $symbol = $this->getSymbol($name);
         if ($exprCtx === null || $symbol === null) return null;
 
+        // Visitamos primero la derecha para saber qué registro trae
+        $right = $this->visit($exprCtx);
+
+        if ($symbol->type === 'float32') {
+            $left = $this->fregs->allocate();
+            $this->asm->writeLine("ldr $left, [x29, #{$symbol->offset}]");
+
+            // Si lo que le sumamos es un entero, lo convertimos a float en el vuelo
+            $sRight = $right;
+            $freeRightTemp = false;
+            if (!str_starts_with($right, 's') && !str_starts_with($right, 'd')) {
+                $sRight = $this->fregs->allocate();
+                $this->asm->writeLine("scvtf $sRight, " . $this->regs->to32($right));
+                $freeRightTemp = true;
+            }
+
+            // Cambiar instrucción a su versión flotante 
+            $fOp = $op === 'add' ? 'fadd' : ($op === 'sub' ? 'fsub' : ($op === 'mul' ? 'fmul' : 'fdiv'));
+            
+            $res = $this->fregs->allocate();
+            $this->asm->writeLine("$fOp $res, $left, $sRight");
+            $this->asm->writeLine("str $res, [x29, #{$symbol->offset}]");
+
+            $this->fregs->free($left);
+            $this->fregs->free($res);
+            if ($freeRightTemp) $this->fregs->free($sRight);
+            
+            // Liberar el registro original de la derecha
+            if (str_starts_with($right, 's') || str_starts_with($right, 'd')) {
+                $this->fregs->free($right);
+            } else {
+                $this->regs->free($right);
+            }
+            return null;
+        }
         $left = $this->regs->allocate();
         $leftW = $this->regs->to32($left);
         $this->asm->writeLine("ldr $leftW, [x29, #{$symbol->offset}]");
 
-        $right = $this->visit($exprCtx);
         $rightW = $this->regs->to32($right);
         $res = $this->regs->allocate();
         $resW = $this->regs->to32($res);

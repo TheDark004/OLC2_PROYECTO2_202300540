@@ -489,28 +489,50 @@ class SemanticVisitor extends GolampiBaseVisitor {
 
         if ($leftType === 'unknown' || $rightType === 'unknown') return 'unknown';
 
+        if (($leftType === 'float32' && $rightType === 'int32') || 
+            ($leftType === 'int32' && $rightType === 'float32')) {
+            return 'float32'; 
+        }
+        
+        if ($leftType === 'float32' && $rightType === 'float32') {
+            return 'float32';
+        }
+
+    
         $resultType = $this->typeChecker->checkArithmetic($op, $leftType, $rightType);
         
         if ($resultType === null) {
             $this->addError("Operación inválida: '$op' entre '$leftType' y '$rightType'.", $ctx);
             return 'unknown';
         }
+        
         return $resultType; 
     }
 
-    public function visitMulExpr($ctx) {
+   public function visitMulExpr($ctx) {
         $leftType = $this->visit($ctx->e(0));
         $rightType = $this->visit($ctx->e(1));
         $op = $ctx->op->getText(); // '*', '/', '%'
 
         if ($leftType === 'unknown' || $rightType === 'unknown') return 'unknown';
 
+        if ($op === '*' || $op === '/') {
+            if (($leftType === 'float32' && $rightType === 'int32') || 
+                ($leftType === 'int32' && $rightType === 'float32')) {
+                return 'float32'; 
+            }
+            if ($leftType === 'float32' && $rightType === 'float32') {
+                return 'float32';
+            }
+        }
+
         $resultType = $this->typeChecker->checkArithmetic($op, $leftType, $rightType);
         
         if ($resultType === null) {
             $this->addError("Operación inválida: '$op' entre '$leftType' y '$rightType'.", $ctx);
             return 'unknown';
         }
+        
         return $resultType; 
     }
 
@@ -544,6 +566,23 @@ class SemanticVisitor extends GolampiBaseVisitor {
     }
 
     private function checkFunctionCall(string $name, array $args, $ctx, bool $asExpression): mixed {
+     
+        $builtins = [
+            'len' => 'int32',
+            'typeof' => 'string',
+            'now' => 'string',
+            'substr' => 'string'
+        ];
+
+        if (isset($builtins[$name])) {
+          
+            foreach ($args as $argCtx) {
+                $this->visit($argCtx);
+            }
+           
+            return $builtins[$name];
+        }
+
         if (!isset($this->functionSignatures[$name])) {
             $this->addError("La función '{$name}' no ha sido declarada.", $ctx);
             return 'unknown';
@@ -855,8 +894,24 @@ class SemanticVisitor extends GolampiBaseVisitor {
 
         foreach ($actualTypes as $i => $actualType) {
             $expectedType = $this->currentFunctionReturns[$i] ?? null;
-            if ($expectedType !== null && $actualType !== 'unknown' && !$this->typeChecker->checkAssignment($expectedType, $actualType)) {
-                $this->addError("Return inválido en valor " . ($i + 1) . ": se esperaba '{$expectedType}' y se recibió '{$actualType}'.", $ctx);
+            
+            if ($expectedType !== null && $actualType !== 'unknown') {
+                
+                $isValid = $this->typeChecker->checkAssignment($expectedType, $actualType);
+                
+               
+                if (!$isValid) {
+                    $isIntFamily = ($expectedType === 'int' || $expectedType === 'int32') && 
+                                   ($actualType === 'int' || $actualType === 'int32');
+                    if ($isIntFamily) {
+                        $isValid = true; 
+                    }
+                }
+
+              
+                if (!$isValid) {
+                    $this->addError("Return inválido en valor " . ($i + 1) . ": se esperaba '{$expectedType}' y se recibió '{$actualType}'.", $ctx);
+                }
             }
         }
 
@@ -916,4 +971,6 @@ class SemanticVisitor extends GolampiBaseVisitor {
     public function visitForAssignPost($ctx) {
         return $this->visitAssignStmt($ctx);
     }
+
+   
 }
