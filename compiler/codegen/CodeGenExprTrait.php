@@ -608,7 +608,7 @@ trait CodeGenExprTrait {
     public function visitTernaryExpr($ctx) {
         $this->asm->writeComment("--- Operador Ternario (cond ? e1 : e2) ---");
         
-      
+        
         $condReg = $this->visit($ctx->e(0));
         $condW = $this->regs->to32($condReg);
 
@@ -618,13 +618,13 @@ trait CodeGenExprTrait {
         $this->asm->writeLine("cmp $condW, #0");
         $this->regs->free($condReg); 
         
-        
+       
         $this->asm->writeLine("b.eq $falseLabel");
 
-       
+        
         $resReg1 = $this->visit($ctx->e(1));
         
-    
+        
         $isFloat = str_starts_with($resReg1, 's') || str_starts_with($resReg1, 'd');
         $finalReg = $isFloat ? $this->fregs->allocate() : $this->regs->allocate();
 
@@ -636,8 +636,10 @@ trait CodeGenExprTrait {
             $this->regs->free($resReg1);
         }
         
+    
         $this->asm->writeLine("b $endLabel");
 
+        
         $this->asm->writeLabel($falseLabel);
         $resReg2 = $this->visit($ctx->e(2));
         
@@ -649,9 +651,9 @@ trait CodeGenExprTrait {
             $this->regs->free($resReg2);
         }
 
+       
         $this->asm->writeLabel($endLabel);
 
         return $finalReg;
     }
-
 }

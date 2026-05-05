@@ -66,18 +66,18 @@ class TypeChecker {
      * Valida asignaciones (ej: var x int32 = 10)
      */
     public function checkAssignment(string $expectedType, string $actualType): bool {
-        // 1. Tipos idénticos siempre son válidos
+        
         if ($expectedType === $actualType) {
             return true;
         }
 
-        // 2. Familia de enteros (int y int32 son compatibles entre sí)
+        
         if (($expectedType === 'int' || $expectedType === 'int32') && 
             ($actualType === 'int' || $actualType === 'int32')) {
             return true;
         }
 
-        // ... deja el resto del código que ya tenías (como el de 'nil' y punteros) ...
+        
         if ($actualType === 'nil' && str_contains($expectedType, '*')) {
             return true;
         }

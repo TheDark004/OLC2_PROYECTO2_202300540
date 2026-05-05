@@ -242,7 +242,7 @@ e
     | e op=('=='|'!=') e                                    # EqExpr
     | e op='&&' e                                           # AndExpr
     | e op='||' e                                           # OrExpr
-    | e '?' e ':' e                                         #TernaryExpr
+    | e '?' e ':' else                                      # TernaryExpr
     ;
 
 
